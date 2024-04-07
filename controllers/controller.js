@@ -1,4 +1,5 @@
 const db = require("../db");
+const axios = require("axios");
 const calculateCreditScore = require("../helpers/calculateCreditScore");
 const calculateMonthlyInstallment = require("../helpers/calculateEMI");
 
@@ -13,32 +14,28 @@ exports.registerCustomer = async (req, res) => {
 
     // Insert new customer into database
     const query = `INSERT INTO customers (first_name, last_name, age, monthly_salary, approved_limit, phone_number) VALUES (?, ?, ?, ?, ?, ?)`;
-    const result = await db.query(
-      query,
-      [
-        first_name,
-        last_name,
-        age,
-        monthly_income,
-        approved_limit,
-        phone_number,
-      ],
-      (err, result) => {
-        const insertedId = result.insertId;
+    const [result] = await db.execute(query, [
+      first_name,
+      last_name,
+      age,
+      monthly_income,
+      approved_limit,
+      phone_number,
+    ]);
 
-        // Construct response object
-        const response = {
-          customer_id: insertedId,
-          name: `${first_name} ${last_name}`,
-          age: age,
-          monthly_income: monthly_income,
-          approved_limit: approved_limit,
-          phone_number: phone_number,
-        };
+    const insertedId = result.insertId;
 
-        res.status(201).json(response);
-      }
-    );
+    // Construct response object
+    const response = {
+      customer_id: insertedId,
+      name: `${first_name} ${last_name}`,
+      age: age,
+      monthly_income: monthly_income,
+      approved_limit: approved_limit,
+      phone_number: phone_number,
+    };
+
+    res.status(201).json(response);
   } catch (error) {
     console.error("Error registering customer:", error);
     res.status(500).json({ message: "Internal server error" });
@@ -52,99 +49,88 @@ exports.checkLoanEligibility = async (req, res) => {
 
     // Fetch customer's data from database
     const customerQuery = `SELECT * FROM customers WHERE customer_id = ?`;
-    const customerRows = await db.query(
-      customerQuery,
-      [customer_id],
-      async (err, result) => {
-        if (err) throw err;
-        const customer = result[0];
+    const [customerRows] = await db.execute(customerQuery, [customer_id]);
+    const customer = customerRows[0];
 
-        // Get current date in YYYY-MM-DD format
-        const currentDate = new Date().toISOString().split("T")[0];
+    // Get current date in YYYY-MM-DD format
+    const currentDate = new Date().toISOString().split("T")[0];
 
-        // Check if sum of current loans exceeds approved limit
-        const currentLoansQuery = `SELECT SUM(loan_amount) AS total_loans FROM loans WHERE customer_id = ? AND date_of_approval <= ? AND (end_date IS NULL OR end_date >= ?)`;
-        const currentLoansRows = await db.query(
-          currentLoansQuery,
-          [customer_id, currentDate, currentDate],
-          async (err, result2) => {
-            if (err) throw err;
+    // Check if sum of current loans exceeds approved limit
+    const currentLoansQuery = `SELECT SUM(loan_amount) AS total_loans FROM loans WHERE customer_id = ? AND date_of_approval <= ? AND (end_date IS NULL OR end_date >= ?)`;
+    const [currentLoansRows] = await db.execute(currentLoansQuery, [
+      customer_id,
+      currentDate,
+      currentDate,
+    ]);
 
-            const totalLoans = result2[0].total_loans || 0;
+    const totalLoans = currentLoansRows[0].total_loans || 0;
 
-            if (totalLoans > customer.approved_limit) {
-              return res.status(200).json({
-                customer_id: customer_id,
-                approval: false,
-                message: "Sum of current loans exceeds approved limit",
-              });
-            }
+    if (totalLoans > customer.approved_limit) {
+      return res.status(200).json({
+        customer_id: customer_id,
+        approval: false,
+        message: "Sum of current loans exceeds approved limit",
+      });
+    }
 
-            // Calculate credit score
-            const creditScore = await calculateCreditScore(customer_id);
-            console.log(creditScore)
+    // Calculate credit score
+    const creditScore = await calculateCreditScore(customer_id);
 
-            let approval = false;
-            let corrected_interest_rate = interest_rate;
+    let approval = false;
+    let corrected_interest_rate = interest_rate;
 
-            // Check if sum of all current EMIs > 50% of monthly salary
-            const emisQuery = `
+    // Check if sum of all current EMIs > 50% of monthly salary
+    const emisQuery = `
               SELECT SUM(monthly_repayment) AS total_emis
               FROM loans
               WHERE customer_id = ? AND date_of_approval <= ? AND (end_date IS NULL OR end_date >= ?)`;
-            const emisRows = await db.query(
-              emisQuery,
-              [customer_id, currentDate, currentDate],
-              (err, result3) => {
-                if (err) throw err;
-                const totalEmis = result3[0].total_emis || 0;
+    const [emisRows] = await db.execute(emisQuery, [
+      customer_id,
+      currentDate,
+      currentDate,
+    ]);
+    const totalEmis = emisRows[0].total_emis || 0;
 
-                if (totalEmis > 0.5 * customer.monthly_salary) {
-                  return res.status(200).json({
-                    customer_id: customer_id,
-                    approval: false,
-                    message:
-                      "Sum of all current emis is greater than 50% of the monthly salary",
-                  });
-                } else {
-                  if (creditScore > 50) {
-                    approval = true;
-                  } else if (creditScore > 30) {
-                    approval = true;
-                    if (interest_rate < 12) {
-                      corrected_interest_rate = 12;
-                    }
-                  } else if (creditScore > 10) {
-                    approval = true;
-                    if (interest_rate < 16) {
-                      corrected_interest_rate = 16;
-                    }
-                  }
-                }
-
-                // Prepare response
-                const response = {
-                  customer_id: customer_id,
-                  approval: approval,
-                  interest_rate: interest_rate,
-                  corrected_interest_rate: corrected_interest_rate,
-                  tenure: tenure,
-                  monthly_installment: approval
-                    ? calculateMonthlyInstallment(
-                        loan_amount,
-                        corrected_interest_rate,
-                        tenure
-                      )
-                    : 0,
-                };
-
-                res.status(200).json(response);
-              }
-            );
-          }
-        );
+    if (totalEmis > 0.5 * customer.monthly_salary) {
+      return res.status(200).json({
+        customer_id: customer_id,
+        approval: false,
+        message:
+          "Sum of all current emis is greater than 50% of the monthly salary",
+      });
+    } else {
+      if (creditScore > 50) {
+        approval = true;
+      } else if (creditScore > 30) {
+        approval = true;
+        if (interest_rate < 12) {
+          corrected_interest_rate = 12;
+        }
+      } else if (creditScore > 10) {
+        approval = true;
+        if (interest_rate < 16) {
+          corrected_interest_rate = 16;
+        }
       }
-    );
+    }
+
+    // Prepare response
+    const response = {
+      customer_id: customer_id,
+      approval: approval,
+      interest_rate: interest_rate,
+      corrected_interest_rate: corrected_interest_rate,
+      tenure: tenure,
+      monthly_installment: approval
+        ? calculateMonthlyInstallment(
+            loan_amount,
+            tenure,
+            corrected_interest_rate
+          )
+        : 0,
+    };
+
+    res.status(200).json(response);
   } catch (error) {
     console.error("Error checking eligibility:", error);
     res.status(500).json({ message: "Internal server error" });
@@ -169,7 +155,7 @@ exports.createLoan = async (req, res) => {
     );
 
     let { approval, corrected_interest_rate, monthly_installment } =
-      isCustomerElgibleForTheLoan;
+      isCustomerElgibleForTheLoan.data;
 
     let loanApproved = approval;
 
@@ -182,8 +168,8 @@ exports.createLoan = async (req, res) => {
 
     if (loanApproved) {
       if (corrected_interest_rate !== interest_rate) {
-        const query = `INSERT INTO loans (customer_id, loan_amount, interest_rate, tenure, monthly_repayment, emis_paid_on_time, date_of_approval, end_date) VALUES (?, ?, ?, ?, ?, ?,?)`;
-        const result = await db.query(query, [
+        const query = `INSERT INTO loans (customer_id, loan_amount, interest_rate, tenure, monthly_repayment, emis_paid_on_time, date_of_approval, end_date) VALUES (?, ?, ?, ?, ?, ?,?, ?)`;
+        const [result] = await db.execute(query, [
           customer_id,
           loan_amount,
           corrected_interest_rate,
@@ -201,32 +187,32 @@ exports.createLoan = async (req, res) => {
           message: `Loan is approved but at higher interest rate due to low credit score. New interest rate will be ${corrected_interest_rate}`,
           monthly_installment: monthly_installment,
         };
+        res.status(200).json(response);
+      } else {
+        // Insert new loan into database
+        const query = `INSERT INTO loans (customer_id, loan_amount, tenure, interest_rate, monthly_repayment, emis_paid_on_time, date_of_approval, end_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+        const [result] = await db.execute(query, [
+          customer_id,
+          loan_amount,
+          tenure,
+          interest_rate,
+          monthly_installment,
+          0,
+          date_of_approval,
+          end_date,
+        ]);
+        const insertedId = result.insertId;
+
+        // Prepare response for successful loan creation
+        const response = {
+          loan_id: insertedId,
+          customer_id: customer_id,
+          loan_approved: loanApproved,
+          message: "Loan approved",
+          monthly_installment: monthly_installment,
+        };
+        res.status(200).json(response);
       }
-
-      // Insert new loan into database
-      const query = `INSERT INTO loans (customer_id, loan_amount, interest_rate, tenure, monthly_repayment, emis_paid_on_time, date_of_approval, end_date) VALUES (?, ?, ?, ?, ?)`;
-      const result = await db.query(query, [
-        customer_id,
-        loan_amount,
-        interest_rate,
-        tenure,
-        monthly_installment,
-        0,
-        date_of_approval,
-        end_date,
-      ]);
-      const insertedId = result.insertId;
-
-      // Prepare response for successful loan creation
-      const response = {
-        loan_id: insertedId,
-        customer_id: customer_id,
-        loan_approved: loanApproved,
-        message: "Loan approved",
-        monthly_installment: monthly_installment,
-      };
-
-      res.status(200).json(response);
     } else {
       // Prepare response for unsuccessful loan creation
       const response = {
@@ -258,7 +244,7 @@ exports.viewLoan = async (req, res) => {
       INNER JOIN customers ON loans.customer_id = customers.customer_id
       WHERE loans.loan_id = ?
     `;
-    const [loanRows] = await db.query(loanQuery, [loanId]);
+    const [loanRows] = await db.execute(loanQuery, [loanId]);
     if (loanRows.length === 0) {
       return res.status(404).json({ message: "Loan not found" });
     }
@@ -295,11 +281,11 @@ exports.makePayment = async (req, res) => {
 
     // Fetch loan details from database
     const loanQuery = `
-      SELECT loan_amount, monthly_repayment, emis_paid_on_time 
+      SELECT loan_amount, monthly_repayment, emis_paid_on_time, tenure, interest_rate 
       FROM loans 
       WHERE loan_id = ? AND customer_id = ?
     `;
-    const [loanRows] = await db.query(loanQuery, [loan_id, customer_id]);
+    const [loanRows] = await db.execute(loanQuery, [loan_id, customer_id]);
     if (loanRows.length === 0) {
       return res
         .status(404)
@@ -307,7 +293,7 @@ exports.makePayment = async (req, res) => {
     }
 
     const loan = loanRows[0];
-    const { loan_amount, monthly_repayment, emis_paid_on_time } = loan;
+    const { loan_amount, monthly_repayment, emis_paid_on_time, tenure, interest_rate } = loan;
 
     // Calculate remaining loan amount after payment
     const remainingAmount = loan_amount - amount;
@@ -336,14 +322,17 @@ exports.makePayment = async (req, res) => {
       SET monthly_repayment = ?, emis_paid_on_time = ? 
       WHERE loan_id = ? AND customer_id = ?
     `;
-    await db.query(updateQuery, [
+    await db.execute(updateQuery, [
       updatedMonthlyInstallment,
       emis_paid_on_time + 1,
       loan_id,
       customer_id,
     ]);
 
-    res.status(200).json({ message: "Payment successful" });
+    const amount_paid = emis_paid_on_time * monthly_repayment;
+    const amount_remaining = loan_amount - amount_paid;
+
+    res.status(200).json({ message: "Payment successful", amount_remaining: amount_remaining });
   } catch (error) {
     console.error("Error making payment:", error);
     res.status(500).json({ message: "Internal server error" });
@@ -357,11 +346,11 @@ exports.viewLoanStatement = async (req, res) => {
 
     // Fetch loan details from database
     const loanQuery = `
-      SELECT loan_id, loan_amount, interest_rate, monthly_repayment, tenure 
+      SELECT loan_id, loan_amount, interest_rate, monthly_repayment, tenure, emis_paid_on_time 
       FROM loans 
       WHERE loan_id = ? AND customer_id = ?
     `;
-    const [loanRows] = await db.query(loanQuery, [loan_id, customer_id]);
+    const [loanRows] = await db.execute(loanQuery, [loan_id, customer_id]);
     if (loanRows.length === 0) {
       return res
         .status(404)
@@ -369,12 +358,12 @@ exports.viewLoanStatement = async (req, res) => {
     }
 
     const loan = loanRows[0];
-    const { loan_amount, interest_rate, monthly_repayment, tenure } = loan;
+    const { loan_amount, interest_rate, monthly_repayment, tenure, emis_paid_on_time } = loan;
 
     // Calculate remaining number of EMIs
     const remainingEMIs = tenure - emis_paid_on_time;
 
-    const amount_paid = loan_amount - remainingEMIs * monthly_repayment;
+    const amount_paid = emis_paid_on_time * monthly_repayment;
 
     // Prepare loan statement response
     const statement = {
